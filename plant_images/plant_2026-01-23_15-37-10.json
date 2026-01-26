@@ -1,0 +1,31 @@
+{
+    "success": true,
+    "plant": "Digitalis obscura",
+    "common_names": [
+        "Willow-leaf foxglove",
+        "Spanish Rusty Foxglove",
+        "Spanish Shrub Foxglove"
+    ],
+    "category_primary": "mediterranean",
+    "traits": [
+        "woody"
+    ],
+    "category": "mediterranean",
+    "moisture_min": 19,
+    "moisture_max": 39,
+    "moisture_target": 29,
+    "timestamp": "2026-01-23_15-37-10",
+    "image_url": "http://10.0.2.2:8000/images/plant_2026-01-23_15-37-10.jpg",
+    "confidence": 0.431,
+    "description_short": "Digitalis obscura, commonly called willow-leaved foxglove or dusty foxglove or Spanish rusty foxglove, is a flowering plant native to regions in Spain and Morocco. It is also grown as an ornamental flower.",
+    "description_long": "Digitalis obscura, commonly called willow-leaved foxglove or dusty foxglove or Spanish rusty foxglove, is a flowering plant native to regions in Spain and Morocco. It is also grown as an ornamental flower. This foxglove is a woody perennial plant belonging to the family Plantaginaceae. Along with the other foxgloves it used to be placed in the figwort family, Scrophulariaceae; however, recent genetic research has moved the genus Digitalis to a larger family. It is similar to many of the foxglove species in its high toxicity and medicinal use as a source for the heart-regulating drug digoxin. Its strikingly distinctive amber- to copper-coloured flowers give the species its name and help distinguish it from other members of the genus.\n\n\n Distribution \nDigitalis obscura is native to the western Mediterranean in eastern and southern Spain and northern Morocco, where it is found growing in dry, open woods and often on limestone.\nDigitalis obscura subsp. laciniata is found in the mountains of southern Spain and northern Morocco. It has serrate or deeply toothed leaf margins in contrast to the smooth margins of the species.",
+    "wiki_url": "https://en.wikipedia.org/wiki/Digitalis_obscura",
+    "extra_images": [],
+    "category_reasoning": [
+        "trait: woody",
+        "primary score +3 mediterranean"
+    ],
+    "trait_modifiers_applied": [
+        "woody(-1,-1,-1)"
+    ]
+}
