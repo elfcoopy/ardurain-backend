@@ -19,7 +19,7 @@ def wikidata_search_entity(scientific_name: str) -> str:
         "search": scientific_name,
         "language": "en",
         "format": "json",
-        "limit": 1
+        "limit": 1,
     }
     headers = {"User-Agent": "ArduRain/1.0 (plant project)"}
     r = requests.get(WIKIDATA_API, params=params, headers=headers, timeout=20)
@@ -35,6 +35,7 @@ def wikidata_get_trait_labels(qid: str) -> List[str]:
     if not qid:
         return []
 
+    # Keep this conservative (fast + reliable)
     query = f"""
     SELECT ?valLabel WHERE {{
       VALUES ?plant {{ wd:{qid} }}
@@ -42,26 +43,27 @@ def wikidata_get_trait_labels(qid: str) -> List[str]:
       OPTIONAL {{ ?plant wdt:P3833 ?val . }}   # growth habit
       OPTIONAL {{ ?plant wdt:P31   ?val . }}   # instance of
       OPTIONAL {{ ?plant wdt:P279  ?val . }}   # subclass of
+      OPTIONAL {{ ?plant wdt:P171  ?val . }}   # parent taxon (helps: cactus family etc.)
 
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
     }}
-    LIMIT 80
+    LIMIT 120
     """
 
     headers = {
         "Accept": "application/sparql-results+json",
-        "User-Agent": "ArduRain/1.0 (plant project)"
+        "User-Agent": "ArduRain/1.0 (plant project)",
     }
     r = requests.get(
         WIKIDATA_SPARQL,
         params={"query": query},
         headers=headers,
-        timeout=25
+        timeout=25,
     )
     r.raise_for_status()
     js = r.json()
 
-    out = []
+    out: List[str] = []
     for b in js.get("results", {}).get("bindings", []):
         lbl = b.get("valLabel", {}).get("value", "")
         if lbl:
@@ -118,11 +120,7 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     Returns:
       primary_category: str
       traits: List[str]
-      reasoning: List[str]   (debug)
-
-    NOTE:
-    - We infer from (Wikidata labels + Wikipedia summary text).
-    - This is heuristic: great coverage, not perfect truth.
+      reasoning: List[str]
     """
 
     reasoning: List[str] = []
@@ -154,17 +152,17 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     if _has_any(combined, "bog", "peat", "mire"):
         _add_trait(traits, reasoning, "bog_plant", "keyword")
 
-    # Climate traits
+    # Cold / high altitude traits
     if _has_any(combined, "arctic", "tundra", "polar"):
         _add_trait(traits, reasoning, "arctic", "keyword")
     if _has_any(combined, "alpine", "subalpine", "montane", "high elevation", "high-elevation"):
         _add_trait(traits, reasoning, "alpine", "keyword")
     if _has_any(combined, "boreal", "taiga"):
         _add_trait(traits, reasoning, "boreal", "keyword")
-    if _has_any(combined, "frost", "freeze", "cold-hardy", "cold hardy", "hardy"):
+    if _has_any(combined, "frost", "freeze", "freezing", "cold-hardy", "cold hardy", "hardy", "subzero", "snow"):
         _add_trait(traits, reasoning, "cold_hardy", "keyword")
 
-    # Growth form traits
+    # Growth-form traits (kept as traits only — NOT a primary bucket)
     if _has_any(combined, "fern", "pteridophyte"):
         _add_trait(traits, reasoning, "fern", "keyword")
     if _has_any(combined, "tree"):
@@ -174,14 +172,15 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     if _has_any(combined, "woody", "woody perennial"):
         _add_trait(traits, reasoning, "woody", "keyword")
 
-    # Indoor hint (do NOT let this dominate unless explicit)
-    if _has_any(combined, "houseplant", "indoor plant", "potted plant"):
-        _add_trait(traits, reasoning, "houseplant", "keyword")
+    # Indoor hint (houseplant should only win if explicit)
+    explicit_houseplant = _has_any(combined, "houseplant", "indoor plant", "potted plant")
+    if explicit_houseplant:
+        _add_trait(traits, reasoning, "houseplant", "explicit indoor")
 
     # -------------------------
     # PRIMARY CATEGORY scoring
     # -------------------------
-    # IMPORTANT: these must match keys you support in moisture_service + climate_service.
+    # IMPORTANT: must match keys in moisture_service PRIMARY_MOISTURE_BASE
     PRIMARY_KEYS = [
         "arctic",
         "alpine",
@@ -199,33 +198,32 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
         "aquatic",
         "coastal",
         "houseplant",
-        "fern",
     ]
 
     DEFAULT_PRIMARY = "houseplant"
     scores: Dict[str, int] = {k: 0 for k in PRIMARY_KEYS}
 
-    # Strong cold signals
+    # ---- EXTREMELY strong cold signals ----
     if _has_any(combined, "arctic", "tundra", "polar"):
-        _add_score(scores, reasoning, "arctic", 10, "cold biome keyword")
+        _add_score(scores, reasoning, "arctic", 12, "cold biome keyword")
     if _has_any(combined, "alpine", "subalpine", "montane", "high elevation", "high-elevation"):
-        _add_score(scores, reasoning, "alpine", 9, "mountain keyword")
+        _add_score(scores, reasoning, "alpine", 10, "mountain keyword")
     if _has_any(combined, "boreal", "taiga"):
-        _add_score(scores, reasoning, "temperate_cold", 6, "boreal/taiga keyword")
-    if _has_any(combined, "frost", "freeze", "cold", "snow", "ice"):
-        _add_score(scores, reasoning, "temperate_cold", 4, "cold condition keyword")
+        _add_score(scores, reasoning, "temperate_cold", 8, "boreal/taiga keyword")
+    if _has_any(combined, "glacial", "permafrost", "subzero", "snowfield", "fellfield"):
+        _add_score(scores, reasoning, "arctic", 10, "extreme cold keyword")
+    if _has_any(combined, "frost", "freeze", "freezing", "snow", "ice"):
+        _add_score(scores, reasoning, "temperate_cold", 5, "cold condition keyword")
 
-    # Wet environments
+    # ---- Wet environments ----
     if _has_any(combined, "aquatic", "water plant", "hydrophyte"):
         _add_score(scores, reasoning, "aquatic", 10, "aquatic keyword")
     if _has_any(combined, "bog", "peat", "mire"):
         _add_score(scores, reasoning, "bog", 9, "bog keyword")
     if _has_any(combined, "wetland", "marsh", "swamp", "fen"):
         _add_score(scores, reasoning, "wetland", 8, "wetland keyword")
-    if _has_any(combined, "fern", "pteridophyte"):
-        _add_score(scores, reasoning, "fern", 6, "fern keyword")
 
-    # Humid tropics
+    # ---- Humid tropics ----
     if _has_any(combined, "rainforest"):
         _add_score(scores, reasoning, "rainforest", 8, "rainforest keyword")
     if _has_any(combined, "tropical"):
@@ -233,7 +231,7 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     if _has_any(combined, "subtropical"):
         _add_score(scores, reasoning, "subtropical", 5, "subtropical keyword")
 
-    # Dry climates
+    # ---- Dry climates ----
     if _has_any(combined, "desert"):
         _add_score(scores, reasoning, "desert", 7, "desert keyword")
     if _has_any(combined, "arid", "semi-arid", "semiarid"):
@@ -241,26 +239,29 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     if _has_any(combined, "mediterranean"):
         _add_score(scores, reasoning, "mediterranean", 5, "mediterranean keyword")
 
-    # Open habitats
+    # ---- Open habitats ----
     if _has_any(combined, "grassland", "prairie", "steppe", "meadow"):
         _add_score(scores, reasoning, "grassland", 4, "grassland/meadow keyword")
     if _has_any(combined, "savanna", "savannah"):
         _add_score(scores, reasoning, "savanna", 4, "savanna keyword")
 
-    # Coastal
+    # ---- Coastal ----
     if _has_any(combined, "coastal", "shore", "dune", "seashore", "salt spray", "saline"):
         _add_score(scores, reasoning, "coastal", 5, "coastal keyword")
 
-    # Temperate general
+    # ---- Temperate general ----
     if _has_any(combined, "temperate"):
         _add_score(scores, reasoning, "temperate", 3, "temperate keyword")
 
-    # Indoor/houseplant should be a strong signal only if explicit
-    if _has_any(combined, "houseplant", "indoor plant"):
-        _add_score(scores, reasoning, "houseplant", 7, "explicit indoor keyword")
+    # ---- Indoor/houseplant (ONLY if explicit) ----
+    if explicit_houseplant:
+        _add_score(scores, reasoning, "houseplant", 9, "explicit indoor keyword")
+    else:
+        # Prevent houseplant from winning by accident
+        scores["houseplant"] -= 2
 
-    # Trait nudges
-    if "cactus" in traits or "succulent" in traits or "xerophyte" in traits or "drought_tolerant" in traits:
+    # ---- Trait nudges (small) ----
+    if any(t in traits for t in ["cactus", "succulent", "xerophyte", "drought_tolerant"]):
         _add_score(scores, reasoning, "desert", 3, "dry traits")
     if "wetland_plant" in traits:
         _add_score(scores, reasoning, "wetland", 2, "wetland trait")
@@ -269,15 +270,20 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     if "hydrophyte" in traits:
         _add_score(scores, reasoning, "aquatic", 2, "hydrophyte trait")
     if "arctic" in traits:
-        _add_score(scores, reasoning, "arctic", 2, "arctic trait")
+        _add_score(scores, reasoning, "arctic", 3, "arctic trait")
     if "alpine" in traits:
-        _add_score(scores, reasoning, "alpine", 2, "alpine trait")
+        _add_score(scores, reasoning, "alpine", 3, "alpine trait")
+    if "cold_hardy" in traits:
+        _add_score(scores, reasoning, "temperate_cold", 2, "cold_hardy trait")
+
+    # Fern trait should push toward wetter/humid *but not a primary bucket*
     if "fern" in traits:
-        _add_score(scores, reasoning, "fern", 2, "fern trait")
+        _add_score(scores, reasoning, "rainforest", 1, "fern trait -> humid bias")
+        _add_score(scores, reasoning, "wetland", 1, "fern trait -> moist bias")
 
     # Choose best
     primary = max(scores.items(), key=lambda kv: kv[1])[0]
-    if scores.get(primary, 0) == 0:
+    if scores.get(primary, 0) <= 0:
         primary = DEFAULT_PRIMARY
         reasoning.append("primary fallback: houseplant (no strong signals found)")
 
