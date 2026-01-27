@@ -9,6 +9,10 @@ WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 WIKIDATA_CACHE_FILE = "plant_traits_cache.json"
 
+
+# =========================
+# Wikidata fetch + caching
+# =========================
 def wikidata_search_entity(scientific_name: str) -> str:
     params = {
         "action": "wbsearchentities",
@@ -41,7 +45,7 @@ def wikidata_get_trait_labels(qid: str) -> List[str]:
 
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
     }}
-    LIMIT 60
+    LIMIT 80
     """
 
     headers = {
@@ -88,17 +92,39 @@ def get_wikidata_traits(scientific_name: str) -> Dict[str, Any]:
     return traits
 
 
+# =========================
+# Classification helpers
+# =========================
 def _has_any(text: str, *words: str) -> bool:
     return any(w in text for w in words)
 
 
+def _add_trait(traits: List[str], reasoning: List[str], name: str, why: str) -> None:
+    if name not in traits:
+        traits.append(name)
+        reasoning.append(f"trait: {name} ({why})")
+
+
+def _add_score(scores: Dict[str, int], reasoning: List[str], key: str, delta: int, why: str) -> None:
+    scores[key] = scores.get(key, 0) + delta
+    reasoning.append(f"primary +{delta} {key} ({why})")
+
+
+# =========================
+# Main inference
+# =========================
 def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str, List[str], List[str]]:
     """
     Returns:
       primary_category: str
       traits: List[str]
       reasoning: List[str]   (debug)
+
+    NOTE:
+    - We infer from (Wikidata labels + Wikipedia summary text).
+    - This is heuristic: great coverage, not perfect truth.
     """
+
     reasoning: List[str] = []
     traits: List[str] = []
 
@@ -107,117 +133,153 @@ def infer_primary_and_traits(scientific_name: str, wiki_hint: str) -> Tuple[str,
     wiki_text = (wiki_hint or "").lower()
     combined = (labels_text + " " + wiki_text).strip()
 
-    # -------- traits (can stack) --------
+    # -------------------------
+    # TRAITS (stackable)
+    # -------------------------
+    # Dry traits
     if _has_any(combined, "cactus", "cactaceae"):
-        traits.append("cactus")
-        reasoning.append("trait: cactus")
-    if _has_any(combined, "succulent"):
-        traits.append("succulent")
-        reasoning.append("trait: succulent")
-    if _has_any(combined, "xerophyte"):
-        traits.append("xerophyte")
-        reasoning.append("trait: xerophyte")
-    if _has_any(combined, "drought-tolerant", "drought tolerant", "arid"):
-        traits.append("drought_tolerant")
-        reasoning.append("trait: drought_tolerant")
+        _add_trait(traits, reasoning, "cactus", "keyword")
+    if _has_any(combined, "succulent", "crassulaceae", "echeveria", "sedum", "aloe"):
+        _add_trait(traits, reasoning, "succulent", "keyword")
+    if _has_any(combined, "xerophyte", "xerophytic"):
+        _add_trait(traits, reasoning, "xerophyte", "keyword")
+    if _has_any(combined, "drought tolerant", "drought-tolerant", "arid", "semi-arid", "semiarid"):
+        _add_trait(traits, reasoning, "drought_tolerant", "keyword")
 
-    if _has_any(combined, "epiphyte", "epiphytic"):
-        traits.append("epiphyte")
-        reasoning.append("trait: epiphyte")
-    if _has_any(combined, "orchid", "orchidaceae"):
-        traits.append("orchid")
-        reasoning.append("trait: orchid")
-    if _has_any(combined, "carnivorous plant", "carnivorous", "drosera", "nepenthes", "sarracenia"):
-        traits.append("carnivorous")
-        reasoning.append("trait: carnivorous")
+    # Wet traits
+    if _has_any(combined, "hydrophyte", "water plant", "aquatic plant"):
+        _add_trait(traits, reasoning, "hydrophyte", "keyword")
+    if _has_any(combined, "wetland", "marsh", "swamp", "fen"):
+        _add_trait(traits, reasoning, "wetland_plant", "keyword")
+    if _has_any(combined, "bog", "peat", "mire"):
+        _add_trait(traits, reasoning, "bog_plant", "keyword")
 
-    if _has_any(combined, "woody", "woodland shrub", "woody perennial"):
-        traits.append("woody")
-        reasoning.append("trait: woody")
+    # Climate traits
+    if _has_any(combined, "arctic", "tundra", "polar"):
+        _add_trait(traits, reasoning, "arctic", "keyword")
+    if _has_any(combined, "alpine", "subalpine", "montane", "high elevation", "high-elevation"):
+        _add_trait(traits, reasoning, "alpine", "keyword")
+    if _has_any(combined, "boreal", "taiga"):
+        _add_trait(traits, reasoning, "boreal", "keyword")
+    if _has_any(combined, "frost", "freeze", "cold-hardy", "cold hardy", "hardy"):
+        _add_trait(traits, reasoning, "cold_hardy", "keyword")
+
+    # Growth form traits
+    if _has_any(combined, "fern", "pteridophyte"):
+        _add_trait(traits, reasoning, "fern", "keyword")
     if _has_any(combined, "tree"):
-        traits.append("tree")
-        reasoning.append("trait: tree")
+        _add_trait(traits, reasoning, "tree", "keyword")
     if _has_any(combined, "shrub"):
-        traits.append("shrub")
-        reasoning.append("trait: shrub")
+        _add_trait(traits, reasoning, "shrub", "keyword")
+    if _has_any(combined, "woody", "woody perennial"):
+        _add_trait(traits, reasoning, "woody", "keyword")
 
-    if _has_any(combined, "hydrophyte", "water plant"):
-        traits.append("hydrophyte")
-        reasoning.append("trait: hydrophyte")
-    if _has_any(combined, "wetland", "marsh", "swamp"):
-        traits.append("wetland_plant")
-        reasoning.append("trait: wetland_plant")
+    # Indoor hint (do NOT let this dominate unless explicit)
+    if _has_any(combined, "houseplant", "indoor plant", "potted plant"):
+        _add_trait(traits, reasoning, "houseplant", "keyword")
 
-    # -------- primary category (choose best via scoring) --------
-    PRIMARY_MOISTURE_BASE = {
-        "desert": (10, 25),
-        "mediterranean": (20, 40),
-        "temperate": (25, 45),
-        "houseplant": (35, 55),
-        "subtropical": (40, 65),
-        "tropical": (45, 70),
-        "rainforest": (60, 85),
-        "fern": (60, 85),
-        "wetland": (75, 92),
-        "bog": (80, 95),
-        "aquatic": (85, 98),
-    }
+    # -------------------------
+    # PRIMARY CATEGORY scoring
+    # -------------------------
+    # IMPORTANT: these must match keys you support in moisture_service + climate_service.
+    PRIMARY_KEYS = [
+        "arctic",
+        "alpine",
+        "temperate_cold",
+        "temperate",
+        "mediterranean",
+        "desert",
+        "grassland",
+        "savanna",
+        "subtropical",
+        "tropical",
+        "rainforest",
+        "wetland",
+        "bog",
+        "aquatic",
+        "coastal",
+        "houseplant",
+        "fern",
+    ]
 
     DEFAULT_PRIMARY = "houseplant"
+    scores: Dict[str, int] = {k: 0 for k in PRIMARY_KEYS}
 
-    scores: Dict[str, int] = {k: 0 for k in PRIMARY_MOISTURE_BASE.keys()}
+    # Strong cold signals
+    if _has_any(combined, "arctic", "tundra", "polar"):
+        _add_score(scores, reasoning, "arctic", 10, "cold biome keyword")
+    if _has_any(combined, "alpine", "subalpine", "montane", "high elevation", "high-elevation"):
+        _add_score(scores, reasoning, "alpine", 9, "mountain keyword")
+    if _has_any(combined, "boreal", "taiga"):
+        _add_score(scores, reasoning, "temperate_cold", 6, "boreal/taiga keyword")
+    if _has_any(combined, "frost", "freeze", "cold", "snow", "ice"):
+        _add_score(scores, reasoning, "temperate_cold", 4, "cold condition keyword")
 
+    # Wet environments
     if _has_any(combined, "aquatic", "water plant", "hydrophyte"):
-        scores["aquatic"] += 5
-        reasoning.append("primary score +5 aquatic")
+        _add_score(scores, reasoning, "aquatic", 10, "aquatic keyword")
     if _has_any(combined, "bog", "peat", "mire"):
-        scores["bog"] += 5
-        reasoning.append("primary score +5 bog")
-    if _has_any(combined, "wetland", "marsh", "swamp"):
-        scores["wetland"] += 4
-        reasoning.append("primary score +4 wetland")
+        _add_score(scores, reasoning, "bog", 9, "bog keyword")
+    if _has_any(combined, "wetland", "marsh", "swamp", "fen"):
+        _add_score(scores, reasoning, "wetland", 8, "wetland keyword")
     if _has_any(combined, "fern", "pteridophyte"):
-        scores["fern"] += 4
-        reasoning.append("primary score +4 fern")
+        _add_score(scores, reasoning, "fern", 6, "fern keyword")
 
+    # Humid tropics
     if _has_any(combined, "rainforest"):
-        scores["rainforest"] += 4
-        reasoning.append("primary score +4 rainforest")
+        _add_score(scores, reasoning, "rainforest", 8, "rainforest keyword")
     if _has_any(combined, "tropical"):
-        scores["tropical"] += 3
-        reasoning.append("primary score +3 tropical")
+        _add_score(scores, reasoning, "tropical", 6, "tropical keyword")
     if _has_any(combined, "subtropical"):
-        scores["subtropical"] += 3
-        reasoning.append("primary score +3 subtropical")
-    if _has_any(combined, "mediterranean"):
-        scores["mediterranean"] += 3
-        reasoning.append("primary score +3 mediterranean")
+        _add_score(scores, reasoning, "subtropical", 5, "subtropical keyword")
+
+    # Dry climates
     if _has_any(combined, "desert"):
-        scores["desert"] += 3
-        reasoning.append("primary score +3 desert")
+        _add_score(scores, reasoning, "desert", 7, "desert keyword")
+    if _has_any(combined, "arid", "semi-arid", "semiarid"):
+        _add_score(scores, reasoning, "desert", 4, "arid keyword")
+    if _has_any(combined, "mediterranean"):
+        _add_score(scores, reasoning, "mediterranean", 5, "mediterranean keyword")
 
-    if _has_any(combined, "houseplant", "indoor plant"):
-        scores["houseplant"] += 3
-        reasoning.append("primary score +3 houseplant")
+    # Open habitats
+    if _has_any(combined, "grassland", "prairie", "steppe", "meadow"):
+        _add_score(scores, reasoning, "grassland", 4, "grassland/meadow keyword")
+    if _has_any(combined, "savanna", "savannah"):
+        _add_score(scores, reasoning, "savanna", 4, "savanna keyword")
 
+    # Coastal
+    if _has_any(combined, "coastal", "shore", "dune", "seashore", "salt spray", "saline"):
+        _add_score(scores, reasoning, "coastal", 5, "coastal keyword")
+
+    # Temperate general
     if _has_any(combined, "temperate"):
-        scores["temperate"] += 2
-        reasoning.append("primary score +2 temperate")
+        _add_score(scores, reasoning, "temperate", 3, "temperate keyword")
 
-    if "cactus" in traits or "succulent" in traits or "xerophyte" in traits:
-        scores["desert"] += 1
-        reasoning.append("primary score +1 desert (traits)")
-    if "wetland_plant" in traits or "hydrophyte" in traits:
-        scores["wetland"] += 1
-        reasoning.append("primary score +1 wetland (traits)")
-    if "epiphyte" in traits or "orchid" in traits:
-        scores["tropical"] += 1
-        reasoning.append("primary score +1 tropical (traits)")
+    # Indoor/houseplant should be a strong signal only if explicit
+    if _has_any(combined, "houseplant", "indoor plant"):
+        _add_score(scores, reasoning, "houseplant", 7, "explicit indoor keyword")
 
+    # Trait nudges
+    if "cactus" in traits or "succulent" in traits or "xerophyte" in traits or "drought_tolerant" in traits:
+        _add_score(scores, reasoning, "desert", 3, "dry traits")
+    if "wetland_plant" in traits:
+        _add_score(scores, reasoning, "wetland", 2, "wetland trait")
+    if "bog_plant" in traits:
+        _add_score(scores, reasoning, "bog", 2, "bog trait")
+    if "hydrophyte" in traits:
+        _add_score(scores, reasoning, "aquatic", 2, "hydrophyte trait")
+    if "arctic" in traits:
+        _add_score(scores, reasoning, "arctic", 2, "arctic trait")
+    if "alpine" in traits:
+        _add_score(scores, reasoning, "alpine", 2, "alpine trait")
+    if "fern" in traits:
+        _add_score(scores, reasoning, "fern", 2, "fern trait")
+
+    # Choose best
     primary = max(scores.items(), key=lambda kv: kv[1])[0]
     if scores.get(primary, 0) == 0:
         primary = DEFAULT_PRIMARY
-        reasoning.append("primary fallback: houseplant")
+        reasoning.append("primary fallback: houseplant (no strong signals found)")
 
     traits = dedup_preserve_order(traits)
     return primary, traits, reasoning
