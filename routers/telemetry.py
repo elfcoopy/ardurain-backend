@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Dict, Any
 from threading import Lock
+from datetime import datetime, timezone
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ _LOCK = Lock()
 
 @router.post("/telemetry/update")
 async def telemetry_update(payload: TelemetryUpdate):
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     data = payload.model_dump()
     data["ts"] = now
     with _LOCK:
@@ -48,7 +49,7 @@ async def device_config_set(payload: DeviceConfig):
     if payload.moisture_max < payload.moisture_min:
         raise HTTPException(status_code=400, detail="moisture_max must be >= moisture_min")
 
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     data = payload.model_dump()
     data["ts"] = now
 
