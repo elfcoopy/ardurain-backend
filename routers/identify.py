@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Request
 from datetime import datetime, timezone
 import os
 import json
+from typing import Optional
 
 from services.plantnet_service import identify_plant
 from services.wiki_service import get_wiki_info
@@ -14,16 +15,108 @@ PLANT_IMAGES_DIR = "plant_images"
 router = APIRouter()
 
 
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _guess_ext(upload: UploadFile) -> str:
+    """
+    Decide the best extension for saving the uploaded image.
+    - Prefer the original filename extension if present.
+    - Otherwise fall back to content-type mapping.
+    """
+    # 1) From filename
+    ext = ""
+    if upload.filename:
+        _, ext = os.path.splitext(upload.filename)
+        ext = (ext or "").lower().strip()
+
+    if ext in {".jpg", ".jpeg", ".png", ".heic", ".heif"}:
+        return ext
+
+    # 2) From content type
+    ct = (upload.content_type or "").lower()
+    if ct in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if ct == "image/png":
+        return ".png"
+    if ct in {"image/heic", "image/heif"}:
+        return ".heic"
+
+    # 3) Default fallback
+    return ".jpg"
+
+
+def _is_heic(upload: UploadFile, ext: str) -> bool:
+    ct = (upload.content_type or "").lower()
+    return ext in {".heic", ".heif"} or ct in {"image/heic", "image/heif"}
+
+
+def _try_convert_heic_to_jpg(src_path: str, dst_path: str) -> bool:
+    """
+    Tries to convert HEIC/HEIF -> JPEG.
+    Returns True if converted, False otherwise.
+    Requires pillow + pillow-heif on the server.
+    """
+    try:
+        from PIL import Image  # type: ignore
+        try:
+            import pillow_heif  # type: ignore
+            pillow_heif.register_heif_opener()
+        except Exception:
+            # If pillow-heif isn't available, PIL probably can't open HEIC
+            pass
+
+        with Image.open(src_path) as im:
+            im = im.convert("RGB")
+            im.save(dst_path, format="JPEG", quality=92, optimize=True)
+        return True
+    except Exception:
+        return False
+
+
 @router.post("/identify_plant")
 async def identify_plant_endpoint(request: Request, file: UploadFile = File(...)):
-    # Save uploaded image
+    _ensure_dir(PLANT_IMAGES_DIR)
+
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"plant_{timestamp}.jpg"
+
+    # Read bytes
+    contents = await file.read()
+    if not contents:
+        return {"success": False, "error": "Empty upload."}
+
+    # Pick extension based on upload
+    ext = _guess_ext(file)
+
+    # Save initial file
+    filename = f"plant_{timestamp}{ext}"
     image_path = os.path.join(PLANT_IMAGES_DIR, filename)
 
-    contents = await file.read()
     with open(image_path, "wb") as f:
         f.write(contents)
+
+    # If HEIC/HEIF, try convert to JPG for PlantNet compatibility
+    if _is_heic(file, ext):
+        jpg_filename = f"plant_{timestamp}.jpg"
+        jpg_path = os.path.join(PLANT_IMAGES_DIR, jpg_filename)
+
+        converted = _try_convert_heic_to_jpg(image_path, jpg_path)
+        if converted:
+            # Prefer the converted jpg for identification and for serving in UI
+            filename = jpg_filename
+            image_path = jpg_path
+        else:
+            # Don't silently fail: PlantNet often rejects HEIC.
+            return {
+                "success": False,
+                "error": (
+                    "PlantNet error: iOS uploaded HEIC/HEIF image and the server "
+                    "could not convert it to JPG. Install server deps: "
+                    "pip install pillow pillow-heif, or configure the iOS picker "
+                    "to export JPEG/PNG."
+                ),
+            }
 
     # Identify plant via PlantNet
     try:
@@ -49,7 +142,7 @@ async def identify_plant_endpoint(request: Request, file: UploadFile = File(...)
     # Moisture (existing)
     moisture_min, moisture_max, moisture_target, moisture_mods = compute_moisture(primary, traits)
 
-    # Climate (NEW: temp/humidity)
+    # Climate (temp/humidity)
     (
         temp_min,
         temp_max,
