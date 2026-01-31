@@ -5,3 +5,5 @@ requests
 wikipedia
 pillow
 pyserial
+pillow
+pillow-heif
